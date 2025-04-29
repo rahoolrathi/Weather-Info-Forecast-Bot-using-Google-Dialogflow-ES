@@ -49,6 +49,63 @@ async function getCurrentWeather(city) {
     throw error;
   }
 }
+async function getMultiDayForecast(city, days) {
+  if (days < 1 || days > 5) {
+    throw new Error("Forecast available only for up to 5 days.");
+  }
+
+  const { lat, lon } = await getCityCoordinates(city);
+  const url = `${FORECAST_WEATHER_URL}?lat=${lat}&lon=${lon}&units=metric&appid=${API_KEY}`;
+  const response = await axios.get(url);
+
+  const forecasts = response.data.list;
+
+  const forecastMap = {};
+
+  forecasts.forEach((item) => {
+    const date = item.dt_txt.split(" ")[0];
+    if (!forecastMap[date]) {
+      forecastMap[date] = [];
+    }
+    forecastMap[date].push(item);
+  });
+
+  const result = [];
+
+  const forecastDates = Object.keys(forecastMap).slice(0, days);
+
+  forecastDates.forEach((date) => {
+    const dayItems = forecastMap[date];
+    const temps = dayItems.map((f) => f.main.temp);
+    const humidities = dayItems.map((f) => f.main.humidity);
+    const windSpeeds = dayItems.map((f) => f.wind.speed);
+    const descriptions = dayItems.map((f) => f.weather[0].description);
+    const icons = dayItems.map((f) => f.weather[0].icon);
+
+    const avg = (arr) =>
+      (arr.reduce((a, b) => a + b, 0) / arr.length).toFixed(1);
+    const mostCommon = (arr) =>
+      arr
+        .sort(
+          (a, b) =>
+            arr.filter((v) => v === a).length -
+            arr.filter((v) => v === b).length
+        )
+        .pop();
+
+    result.push({
+      date,
+      temp_min: Math.min(...temps).toFixed(1),
+      temp_max: Math.max(...temps).toFixed(1),
+      description: mostCommon(descriptions),
+      humidity: avg(humidities),
+      wind_speed: avg(windSpeeds),
+      icon: mostCommon(icons),
+    });
+  });
+
+  return result;
+}
 
 async function getForecastWeather(city, targetDate) {
   try {
@@ -120,19 +177,8 @@ app.post("/webhook", async (req, res) => {
       });
     }
 
-    const dateParam = queryResult.parameters["date-time"];
-    let requestedDate;
-
-    if (dateParam && dateParam !== "") {
-      // Use chrono-node to parse natural date expressions like "tomorrow"
-      const parsedDate = chrono.parseDate(dateParam);
-      requestedDate = parsedDate ? parsedDate : new Date();
-    } else {
-      requestedDate = new Date();
-    }
-
-    let response;
     const intentName = queryResult.intent.displayName;
+    let response;
 
     if (intentName === "Current Weather Intent") {
       const weatherData = await getCurrentWeather(city);
@@ -140,9 +186,43 @@ app.post("/webhook", async (req, res) => {
         fulfillmentText: `Current weather in ${weatherData.city}: ${weatherData.temperature}°C, ${weatherData.description}. Humidity: ${weatherData.humidity}%, Wind: ${weatherData.wind_speed} m/s.`,
       };
     } else if (intentName === "Weather Forecast Intent") {
-      const forecastData = await getForecastWeather(city, requestedDate);
+      const dateParam = queryResult.parameters["date-time"];
+      const parsedDate = dateParam ? chrono.parseDate(dateParam) : new Date();
+
+      const forecastData = await getForecastWeather(city, parsedDate);
       response = {
         fulfillmentText: `Forecast for ${forecastData.city} on ${forecastData.date}: Temperature between ${forecastData.temp_min}°C and ${forecastData.temp_max}°C. ${forecastData.description}. Humidity: ${forecastData.humidity}%, Wind: ${forecastData.wind_speed} m/s.`,
+      };
+    } else if (intentName === "Multi Day Forecast Intent") {
+      const datePeriod = queryResult.parameters["date-period"];
+      let numDays = queryResult.parameters["number"];
+
+      if (!numDays && datePeriod?.startDate && datePeriod?.endDate) {
+        const start = new Date(datePeriod.startDate);
+        const end = new Date(datePeriod.endDate);
+        const msPerDay = 1000 * 60 * 60 * 24;
+        numDays = Math.ceil((end - start) / msPerDay) + 1;
+      }
+
+      if (!numDays || isNaN(numDays)) numDays = 3;
+      if (numDays > 5) {
+        return res.json({
+          fulfillmentText:
+            "Sorry, I can only provide forecasts for up to 5 days.",
+        });
+      }
+
+      const forecasts = await getMultiDayForecast(city, numDays);
+
+      const forecastText = forecasts
+        .map(
+          (f) =>
+            `${f.date}: ${f.description}, temp between ${f.temp_min}°C and ${f.temp_max}°C. Humidity: ${f.humidity}%, Wind: ${f.wind_speed} m/s.`
+        )
+        .join("\n");
+
+      response = {
+        fulfillmentText: `Here's the ${numDays}-day forecast for ${city}:\n${forecastText}`,
       };
     } else {
       response = {
@@ -160,62 +240,6 @@ app.post("/webhook", async (req, res) => {
     });
   }
 });
-
-// // Webhook endpoint
-// app.post("/webhook", async (req, res) => {
-//   try {
-//     console.log("Received webhook request:", JSON.stringify(req.body));
-
-//     const queryResult = req.body.queryResult;
-
-//     let city =
-//       queryResult.parameters["geo-city"] ||
-//       queryResult.parameters["pakistan-city"] ||
-//       "";
-//     city = city.trim();
-
-//     if (!city) {
-//       return res.json({
-//         fulfillmentText: "Please provide a valid city name.",
-//       });
-//     }
-
-//     const dateParam = queryResult.parameters["date-time"];
-//     let requestedDate = null;
-
-//     if (dateParam && dateParam !== "") {
-//       requestedDate = new Date(dateParam);
-//     } else {
-//       requestedDate = new Date();
-//     }
-
-//     let response;
-//     if (queryResult.intent.displayName === "Current Weather Intent") {
-//       const weatherData = await getCurrentWeather(city);
-//       response = {
-//         fulfillmentText: `Current weather in ${weatherData.city}: ${weatherData.temperature}°C, ${weatherData.description}. Humidity: ${weatherData.humidity}%, Wind: ${weatherData.wind_speed} m/s.`,
-//       };
-//     } else if (queryResult.intent.displayName === "Forecast Weather Intent") {
-//       const forecastData = await getForecastWeather(city, requestedDate);
-//       response = {
-//         fulfillmentText: `Forecast for ${forecastData.city} on ${forecastData.date}: Temperature between ${forecastData.temp_min}°C and ${forecastData.temp_max}°C. ${forecastData.description}. Humidity: ${forecastData.humidity}%, Wind: ${forecastData.wind_speed} m/s.`,
-//       };
-//     } else {
-//       response = {
-//         fulfillmentText:
-//           "I can help you with current weather or weather forecasts. Please specify a city.",
-//       };
-//     }
-
-//     console.log("Sending response:", JSON.stringify(response));
-//     return res.json(response);
-//   } catch (error) {
-//     console.error("Error processing webhook:", error);
-//     return res.json({
-//       fulfillmentText: `Sorry, there was an error processing your request: ${error.message}`,
-//     });
-//   }
-// });
 
 app.get("/", (req, res) => {
   res.send("Weather Webhook Service is running!");
